@@ -144,3 +144,15 @@ test('real HTTP adapter and app workflow with a controlled model fixture (not re
     });
   } finally { await stop(); provider.closeAllConnections(); await new Promise(r => provider.close(r)); await rm(dir, { recursive: true, force: true }); }
 });
+
+
+test('DeepSeek key alias and harmless whitespace work without exposing values in diagnostics', () => {
+  const key = randomUUID();
+  const config = readModelConfig({ AI_ENABLED: ' 1 ', AI_PROVIDER: 'DeepSeek ', DEEPSEEK_API_KEY: ' '+key+' ' });
+  assert.equal(config.ready, true); assert.equal(config.apiKey, key);
+  assert.doesNotMatch(JSON.stringify(modelStatus(config)), new RegExp(key));
+  assert.match(config.checks.find(c => c.label === '模型密钥').message, /DEEPSEEK_API_KEY/);
+  const missing = readModelConfig({ AI_ENABLED: '1', api: key });
+  assert.equal(missing.ready, false); assert.match(missing.checks.at(-1).message, /发现其他变量名称 API/);
+  assert.doesNotMatch(JSON.stringify(modelStatus(missing)), new RegExp(key));
+});

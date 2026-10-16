@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, expect
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path('/tmp/casework-smoke')
@@ -89,6 +89,12 @@ with tempfile.TemporaryDirectory(prefix='casework-browser-') as data:
             page.get_by_role('button', name='我是教师').click()
             page.get_by_label('你的称呼').fill('测试教师')
             page.get_by_role('button', name='进入教师工作台').click()
+            page.get_by_role('button', name='检查模型连接').wait_for()
+            assert page.get_by_role('button', name='检查模型连接').is_enabled()
+            page.get_by_role('button', name='检查模型连接').click()
+            page.get_by_text('尚未启用模型服务，当前可继续使用规则演示。', exact=True).last.wait_for()
+            assert page.get_by_role('button', name='检查模型连接').is_enabled()
+            expect(page.locator('.config-checks')).to_contain_text('当前运行实例未读到')
             page.get_by_role('button', name='教学资料', exact=True).click()
             page.locator('.role-guide').first.wait_for()
             assert page.locator('.role-guide').count() == 5

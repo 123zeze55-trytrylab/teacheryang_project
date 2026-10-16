@@ -7,11 +7,15 @@ export class ModelError extends Error {
   constructor(message, status = 502) { super(message); this.status = status; }
 }
 export function readModelConfig(env = process.env) {
-  const enabled = env.AI_ENABLED === '1';
-  const provider = env.AI_PROVIDER || 'deepseek';
+  const enabled = (env.AI_ENABLED || '').trim() === '1';
+  const keyNames = ['MODEL_API_KEY', 'DEEPSEEK_API_KEY'];
+  const source = keyNames.flatMap(name => Object.keys(env).filter(k => k.toUpperCase() === name)).find(name => String(env[name] || '').trim());
+  const apiKey = source ? String(env[source]).trim() : '';
+  const otherNames = ['API', 'API_KEY', 'DEEPSEEK_API'].filter(name => Object.keys(env).some(k => k.toUpperCase() === name));
+  const provider = (env.AI_PROVIDER || 'deepseek').trim().toLowerCase();
   const defaults = { deepseek: ['https://api.deepseek.com/v1', 'deepseek-chat'], openai: ['https://api.openai.com/v1', 'gpt-4.1-mini'] };
   const base = env.AI_BASE_URL || defaults[provider]?.[0] || '';
-  const model = env.AI_MODEL || defaults[provider]?.[1] || '';
+  const model = (env.AI_MODEL || defaults[provider]?.[1] || '').trim();
   let endpoint = null, reason = '';
   try {
     const u = new URL(base);
@@ -22,13 +26,18 @@ export function readModelConfig(env = process.env) {
   } catch { reason = '模型服务地址配置无效，正式服务必须使用 HTTPS。'; }
   if (!['deepseek', 'openai', 'compatible'].includes(provider)) reason = 'AI_PROVIDER 配置无效。';
   if (!model || model.length > 100) reason = '请在服务器设置 AI_MODEL。';
-  if (!env.MODEL_API_KEY) reason = '请在托管平台安全设置 MODEL_API_KEY。';
+  if (!apiKey) reason = '请在托管平台安全设置 MODEL_API_KEY。';
   if (!enabled) reason = '尚未启用模型服务，当前可继续使用规则演示。';
   const timeout = Math.max(1000, Math.min(45000, Number(env.AI_TIMEOUT_MS) || 25000));
-  return { ready: enabled && !reason, provider, model, endpoint, apiKey: env.MODEL_API_KEY || '', timeout, reason };
+  const checks = [
+    { label: 'AI_ENABLED', ok: enabled, message: enabled ? '已启用' : '未启用：在Render设为1，保存并重新部署' },
+    { label: '模型服务与型号', ok: Boolean(endpoint && ['deepseek','openai','compatible'].includes(provider) && model && model.length <= 100), message: provider + ' · ' + model },
+    { label: '模型密钥', ok: Boolean(apiKey), message: source ? `程序已读取 ${source}（不显示内容，是否有效需连接检查）` : `当前运行实例未读到 MODEL_API_KEY 或 DEEPSEEK_API_KEY${otherNames.length ? '；发现其他变量名称 '+otherNames.join('、')+'，请改为受支持名称' : '；请确认变量添加在本网站服务中，且已保存并重新部署'}` },
+  ];
+  return { ready: enabled && !reason, provider, model, endpoint, apiKey, timeout, reason, checks };
 }
 export function modelStatus(config = readModelConfig()) {
-  return { ready: config.ready, provider: config.provider, model: config.model, destination: config.ready ? new URL(config.endpoint).origin : null, reason: config.reason, version: aiVersion,
+  return { ready: config.ready, provider: config.provider, model: config.model, destination: config.ready ? new URL(config.endpoint).origin : null, reason: config.reason, version: aiVersion, checks: config.checks || [],
     notice: '启用后，仅将会谈文字、虚构案例设定和整理的教学要点发送给所配置模型服务；不发送视频、登录姓名或教材全文。AI 输出可能有误，需要教师复核。' };
 }
 async function complete(config, messages, maxTokens = 1200) {

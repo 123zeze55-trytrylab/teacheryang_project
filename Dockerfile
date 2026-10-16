@@ -4,6 +4,7 @@ WORKDIR /app
 COPY --chown=node:node package.json server.js ./
 COPY --chown=node:node public ./public
 COPY --chown=node:node teaching ./teaching
+COPY --chown=node:node ai ./ai
 RUN mkdir -p /app/.data && chown node:node /app/.data
 USER node
 EXPOSE 3000

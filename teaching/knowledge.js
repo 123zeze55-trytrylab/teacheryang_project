@@ -51,7 +51,7 @@ export const knowledge = [
 ];
 export const languageRubric = {
   source: '需求文档：语言评分标准（需求方提供，非教材原文）',
-  notice: '作为教师复核和学生自查的参照；当前规则系统不自动给星级，也不计总分或排名。',
+  notice: '作为教师复核和学生自查的参照；规则模式不自动给星级；AI文字建议星级需教师复核，不等同于视频综合语言评分。不计总分或排名。',
   levels: [
     { stars: 1, description: '未回应案主表达的感受与主要信息。' },
     { stars: 2, description: '主要复述表面内容，对感受的理解和回应较少。' },

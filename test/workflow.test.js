@@ -32,6 +32,7 @@ test('student practice, persistence, video, reflection, teacher review and autho
       const r = await fetch(base); assert.equal(r.status, 200); assert.match(await r.text(), /知遇/);
       assert.equal((await request('/health')).data.mode, 'demo');
       assert.equal((await request('/sessions')).status, 401);
+      assert.equal((await request('/learning')).status, 401);
       assert.equal((await fetch(base + '/.data/db.json')).status, 404);
     });
     await t.test('demo identities and uniform secure random case selection', async () => {
@@ -44,6 +45,11 @@ test('student practice, persistence, video, reflection, teacher review and autho
       assert.equal((await request('/sessions/' + session.id, other.token)).status, 404);
       assert.equal((await request('/sessions', other.token)).data.length, 0);
       assert.equal((await request('/export', student.token)).status, 403);
+      const studentLearning = (await request('/learning', student.token)).data;
+      assert.equal(studentLearning.cards.length, 10); assert.equal(studentLearning.roleGuides, undefined);
+      const teacherLearning = (await request('/learning', teacher.token)).data;
+      assert.equal(teacherLearning.roleGuides.length, 5);
+      assert.equal(session.case.opening, undefined); assert.equal(session.textReview, undefined);
     });
     await t.test('chat persists, rejects empty messages and premature completion', async () => {
       session = (await request(`/sessions/${session.id}/start`, student.token, 'POST')).data;
@@ -62,6 +68,9 @@ test('student practice, persistence, video, reflection, teacher review and autho
       assert.equal((await request('/me', student.token)).data.name, '练习学生');
       assert.equal((await request('/sessions/' + session.id, student.token)).data.messages.length, 3);
       const r = await request(`/sessions/${session.id}/finish`, student.token, 'POST'); assert.equal(r.status, 200); assert.equal(r.data.status, 'upload');
+      assert.equal(r.data.textReview.mode, 'textbook-rules');
+      assert.equal(r.data.textReview.observations.find(o => o.id === 'empathy').evidence[0].quote, '听起来，你一方面担心家人，一方面也感到不容易。我的理解准确吗？');
+      assert.ok(r.data.textReview.observations.flatMap(o => o.references).some(r => r.id === 'empathy'));
     });
     await t.test('upload duration, content signature and access checks; no invented scores', async () => {
       const fake = Buffer.from('this is not a real video file');
@@ -83,9 +92,24 @@ test('student practice, persistence, video, reflection, teacher review and autho
       assert.equal((await request(`/sessions/${session.id}/note`, student.token, 'POST', { note: '冒充教师' })).status, 403);
       assert.equal((await request(`/sessions/${session.id}/note`, teacher.token, 'POST', { note: '尝试具体回应案主的矛盾感受。' })).status, 200);
       assert.equal((await request('/sessions/' + session.id, student.token)).data.teacherNote, '尝试具体回应案主的矛盾感受。');
-      const csv = await request('/export', teacher.token); assert.equal(csv.status, 200); assert.match(csv.data, /练习学生/); assert.match(csv.data, /尝试具体回应/);
+      const csv = await request('/export', teacher.token); assert.equal(csv.status, 200); assert.match(csv.data, /练习学生/); assert.match(csv.data, /尝试具体回应/); assert.match(csv.data, /教材章节依据/); assert.match(csv.data, /第四章/);
       assert.equal((await request('/logout', student.token, 'POST')).status, 200);
       assert.equal((await request('/me', student.token)).status, 401);
+    });
+    await t.test('legacy completed records get supplemental citations without altering original data', async () => {
+      await stop();
+      const dbPath = path.join(dir, 'db.json'); const original = JSON.parse(await readFile(dbPath));
+      const legacy = structuredClone(original.sessions[0]);
+      legacy.id = '00000000-0000-4000-8000-000000000001';
+      delete legacy.textReview; delete legacy.teachingVersion; delete legacy.dialogueEngine;
+      legacy.feedback = { mode: 'demo', language: { stars: null, note: '历史文字反馈' }, voice: { stars: null }, expression: { stars: null } };
+      original.sessions.push(legacy); await writeFile(dbPath, JSON.stringify(original)); await start();
+      const before = await readFile(dbPath, 'utf8');
+      const r = await request('/sessions/' + legacy.id, teacher.token);
+      assert.equal(r.status, 200); assert.equal(r.data.textReview.mode, 'textbook-rules');
+      assert.deepEqual(r.data.feedback, legacy.feedback); assert.deepEqual(r.data.messages, legacy.messages);
+      assert.equal(r.data.reflection, legacy.reflection); assert.equal(r.data.teacherNote, legacy.teacherNote);
+      assert.equal(await readFile(dbPath, 'utf8'), before);
     });
   } finally { await stop(); await rm(dir, { recursive: true, force: true }); }
 });

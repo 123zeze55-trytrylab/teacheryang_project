@@ -3,3 +3,5 @@ node_modules/
 *.log
 .env
 coverage/
+# Uploaded source textbooks stay outside the public repository.
+*.docx

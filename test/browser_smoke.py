@@ -42,6 +42,13 @@ with tempfile.TemporaryDirectory(prefix='casework-browser-') as data:
             page.set_viewport_size({'width': 390, 'height': 844})
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Mobile page overflow'
             page.screenshot(path=str(OUT / 'mobile.png'), full_page=True)
+            page.get_by_role('button', name='教学资料', exact=True).click()
+            page.get_by_role('heading', name='让每一次回应，都有依据').wait_for()
+            assert page.locator('.knowledge-card').count() == 10
+            assert page.locator('.role-guide').count() == 0
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Mobile knowledge overflow'
+            page.screenshot(path=str(OUT / 'learning-mobile.png'), full_page=True)
+            page.get_by_role('button', name='学习概览', exact=False).click()
             page.set_viewport_size({'width': 1024, 'height': 768})
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'iPad page overflow'
             page.get_by_role('button', name='开始一次实训').click()
@@ -62,6 +69,9 @@ with tempfile.TemporaryDirectory(prefix='casework-browser-') as data:
             page.get_by_role('button', name='全部记录').click()
             page.get_by_role('button', name='继续', exact=False).click()
             page.get_by_role('button', name='结束会谈，进入视频演练').click()
+            page.get_by_role('heading', name='文字会谈复盘').wait_for()
+            assert page.locator('.evidence-pair').count() >= 1
+            assert '第四章' in page.locator('.text-review').inner_text()
             page.locator('#video-file').set_input_files(str(video))
             page.wait_for_function('() => document.querySelector("#video-preview video")?.duration > 180')
             page.locator('#consent').check()
@@ -71,11 +81,22 @@ with tempfile.TemporaryDirectory(prefix='casework-browser-') as data:
             page.get_by_role('button', name='提交，完成实训').click()
             page.get_by_role('heading', name='这一次练习，已认真完成').wait_for()
             page.screenshot(path=str(OUT / 'feedback.png'), full_page=True)
+            page.locator('.source-link[data-learn="empathy"]').first.click()
+            page.get_by_role('heading', name='让每一次回应，都有依据').wait_for()
+            assert page.locator('#knowledge-empathy').is_visible()
+            page.get_by_role('button', name='我的记录', exact=True).click()
             page.get_by_role('button', name='退出登录', exact=True).click()
             page.get_by_role('button', name='我是教师').click()
             page.get_by_label('你的称呼').fill('测试教师')
             page.get_by_role('button', name='进入教师工作台').click()
-            page.get_by_role('button', name='查看', exact=False).click()
+            page.get_by_role('button', name='教学资料', exact=True).click()
+            page.locator('.role-guide').first.wait_for()
+            assert page.locator('.role-guide').count() == 5
+            page.locator('.role-guide').filter(has_text='张叔').locator('summary').click()
+            assert '本人失业' in page.locator('.role-guide[open]').inner_text()
+            page.screenshot(path=str(OUT / 'learning-teacher.png'), full_page=True)
+            page.get_by_role('button', name='学生实训', exact=True).click()
+            page.locator('button[data-session]').first.click()
             page.get_by_label('教师点评', exact=True).fill('能够尝试回应案主感受，建议继续练习开放式提问。')
             page.get_by_role('button', name='保存点评').click()
             page.get_by_text('教师点评已保存', exact=True).wait_for()
@@ -84,12 +105,12 @@ with tempfile.TemporaryDirectory(prefix='casework-browser-') as data:
             page.get_by_role('button', name='学生实训', exact=False).click()
             page.get_by_label('搜索学生').fill('测试学生')
             page.get_by_label('实训进度').select_option('completed')
-            page.get_by_role('button', name='查看', exact=False).wait_for()
+            page.locator('button[data-session]').first.wait_for()
             with page.expect_download() as download:
                 page.get_by_role('button', name='导出反馈').click()
             assert '测试学生' in Path(download.value.path()).read_text(encoding='utf-8-sig')
             assert not errors, errors
-            print('Browser smoke passed: desktop/mobile/iPad, login, draw, timed chat, real video upload/playback, reflection, teacher note, filter, CSV; no browser errors.')
+            print('Browser smoke passed: desktop/mobile/iPad, login, draw, timed chat, real video upload/playback, reflection, teacher note, filter, CSV, textbook knowledge, teacher role guides, cited evidence; no browser errors.')
             browser.close()
     finally:
         stop()

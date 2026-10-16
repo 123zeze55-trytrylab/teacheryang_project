@@ -32,7 +32,7 @@ Blueprint 将自动生成 `DEMO_ACCESS_CODE`。在服务的 Environment 设置�
 
 ## 可移植方式
 
-Docker 镜像不依赖 Render，后续也可以部署到支持 Docker 的服务器。当前会话尚未验证 Docker 镜像构建；已验证 Node 启动、完整应用流程和访问保护。
+Docker 镜像不依赖 Render，后续也可以部署到支持 Docker 的服务器。已在当前会话构建 Docker 镜像并启动容器，验证了健康检查、未授权请求拦截和口令通过后的首页访问；应用完整流程及访问保护接口测试均已通过。公网 HTTPS 地址仍需在 Render 实际创建服务后验证。
 
 环境变量：
 

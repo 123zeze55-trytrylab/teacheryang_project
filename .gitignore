@@ -5,3 +5,6 @@ node_modules/
 coverage/
 # Uploaded source textbooks stay outside the public repository.
 *.docx
+
+__pycache__/
+*.pyc

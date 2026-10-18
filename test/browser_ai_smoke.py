@@ -1,5 +1,6 @@
 """AI UI test using a local HTTP model fixture; does NOT validate real DeepSeek."""
 import json
+import sys
 import os
 import secrets
 import shutil
@@ -13,9 +14,12 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright, expect
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'testing'))
+from browser_helpers import ADMIN_PASSWORD, setup_users, register_student, login_teacher
 OUT = Path('/tmp/casework-smoke')
 OUT.mkdir(exist_ok=True)
 scenario = 'valid'
+fixture_key = secrets.token_urlsafe(24)
 class MockModel(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def do_POST(self):
@@ -42,7 +46,7 @@ with tempfile.TemporaryDirectory(prefix='casework-ai-ui-') as data:
     proc = None
     def start():
         global proc
-        proc = subprocess.Popen(['node', 'server.js'], cwd=ROOT, env={**os.environ, 'PORT': '3032', 'DATA_DIR': data, 'NODE_ENV': 'test', 'AI_ENABLED': '1', 'AI_PROVIDER': 'deepseek', 'AI_MODEL': 'mock-model', 'MODEL_API_KEY': secrets.token_urlsafe(24), 'AI_BASE_URL': f'http://127.0.0.1:{mock.server_port}/v1'}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = subprocess.Popen(['node', 'server.js'], cwd=ROOT, env={**os.environ, 'ADMIN_PASSWORD': ADMIN_PASSWORD, 'PORT': '3032', 'DATA_DIR': data, 'NODE_ENV': 'test', 'AI_ENABLED': '1', 'AI_PROVIDER': 'deepseek', 'AI_MODEL': 'mock-model', 'MODEL_API_KEY': fixture_key, 'AI_BASE_URL': f'http://127.0.0.1:{mock.server_port}/v1'}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         assert '3032' in proc.stdout.readline()
     def stop():
         if proc and proc.poll() is None:
@@ -50,6 +54,7 @@ with tempfile.TemporaryDirectory(prefix='casework-ai-ui-') as data:
             proc.wait(timeout=10)
     try:
         start()
+        fixture = setup_users('http://127.0.0.1:3032', 'AI测试')
         with sync_playwright() as p:
             browser = p.chromium.launch(executable_path=shutil.which('chromium'), headless=True, args=['--no-sandbox'])
             tc = browser.new_context(viewport={'width': 1280, 'height': 900})
@@ -58,16 +63,13 @@ with tempfile.TemporaryDirectory(prefix='casework-ai-ui-') as data:
             errors = []
             for page in [teacher, student]: page.on('pageerror', lambda e: errors.append(str(e)))
             teacher.goto('http://127.0.0.1:3032')
-            teacher.get_by_role('button', name='我是教师', exact=True).click()
-            teacher.get_by_label('你的称呼').fill('AI测试教师')
-            teacher.get_by_role('button', name='进入教师工作台').click()
+            login_teacher(teacher, fixture)
             teacher.get_by_role('button', name='检查模型连接').click()
             teacher.get_by_role('heading', name='模型服务：连接检查通过').wait_for()
             student.goto('http://127.0.0.1:3032')
-            student.get_by_label('你的称呼').fill('AI测试学生')
-            student.get_by_role('button', name='进入实训空间').click()
+            register_student(student, fixture)
             student.get_by_role('button', name='开始一次实训').click()
-            student.locator('input[value="ai"]').check()
+            expect(student.locator('input[value="ai"]')).to_be_checked()
             assert student.locator('#ai-consent').is_visible()
             student.locator('#ai-consent').check()
             assert student.evaluate('document.documentElement.scrollWidth <= innerWidth')
@@ -87,6 +89,7 @@ with tempfile.TemporaryDirectory(prefix='casework-ai-ui-') as data:
             db = json.loads(file.read_text()); db['sessions'][0]['startedAt'] = int(time.time() * 1000) - 181000
             file.write_text(json.dumps(db)); start()
             teacher.reload()
+            teacher.get_by_role('heading', name='模型服务：连接检查通过').wait_for()
             teacher.get_by_role('button', name='检查模型连接').click()
             teacher.get_by_role('heading', name='模型服务：连接检查通过').wait_for()
             student.reload()

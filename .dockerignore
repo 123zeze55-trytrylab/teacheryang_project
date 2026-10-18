@@ -6,3 +6,6 @@ node_modules
 *.log
 test
 *.docx
+
+testing
+__pycache__

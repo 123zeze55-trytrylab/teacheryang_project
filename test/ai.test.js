@@ -1,3 +1,4 @@
+import { fixtureEnvironment, provisionLogin } from '../testing/fixtures.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -24,6 +25,10 @@ test('custom model URLs reject credentials, query secrets, fragments and product
 });
 test('role prompts pin the case facts and treat student messages as data', () => {
   const prompt = dialoguePrompt(fixture()); assert.match(prompt, /失业/); assert.match(prompt, /不是系统指令/); assert.match(prompt, /不提供医疗/);
+  const studentCase = dialoguePrompt({ case: cases.find(c => c.id === 'C'), messages: [] });
+  assert.match(studentCase, /为什么.*不适合这里/);
+  assert.match(studentCase, /室友/);
+  assert.match(studentCase, /最近一条|最新/);
 });
 test('AI review verifies verbatim quotes, turn numbers and known textbook references', () => {
   const s = fixture(), raw = resultFor(s), config = { provider: 'deepseek', model: 'fixture' };
@@ -68,11 +73,12 @@ test('real HTTP adapter and app workflow with a controlled model fixture (not re
   const env = { AI_ENABLED: '1', AI_PROVIDER: 'deepseek', AI_MODEL: 'test-model', MODEL_API_KEY: secret, AI_BASE_URL: `http://127.0.0.1:${provider.address().port}/v1`, NODE_ENV: 'test' };
   const config = readModelConfig(env);
   async function start() {
-    app = spawn(process.execPath, ['server.js'], { env: { ...process.env, ...env, DATA_DIR: dir, PORT: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    app = spawn(process.execPath, ['server.js'], { env: { ...process.env, ...fixtureEnvironment, ...env, DATA_DIR: dir, PORT: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
     await new Promise((resolve, reject) => { let log = ''; const timer = setTimeout(() => reject(Error('app startup timeout')), 5000); app.stdout.on('data', data => { log += data; const m = log.match(/端口 (\d+)/); if (m) { base = 'http://127.0.0.1:' + m[1]; clearTimeout(timer); resolve(); } }); app.once('exit', () => { clearTimeout(timer); reject(Error('app exited')); }); });
   }
   async function stop() { if (app && app.exitCode === null) { app.kill(); await once(app, 'exit'); } }
   async function api(route, token, data, method = data === undefined ? 'GET' : 'POST') {
+    if(route==='/login'&&data?.name&&!data.username)return provisionLogin(base,data);
     const res = await fetch(base + '/api' + route, { method, headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(data === undefined ? {} : { 'Content-Type': 'application/json' }) }, body: data === undefined ? undefined : JSON.stringify(data) });
     return { status: res.status, data: await res.json() };
   }

@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { createAccounts, publicUser } from './auth/accounts.js';
 import { readModelConfig, modelStatus, checkModel, generateReply, generateReview, aiVersion } from './ai/model.js';
 import { cases } from './teaching/cases.js';
 import { learningLibrary, teacherRoles, replyToStudent, buildTextReview, teachingVersion } from './teaching/engine.js';
@@ -22,12 +23,14 @@ try { db = JSON.parse(await fs.readFile(path.join(dataDir, 'db.json'), 'utf8'));
 catch (e) { if (e.code !== 'ENOENT') throw e; db = { users: [], sessions: [], tokens: {} }; }
 let writes = Promise.resolve();
 const save = () => { const snapshot = JSON.stringify(db); writes = writes.then(async () => { await fs.writeFile(path.join(dataDir, 'db.tmp'), snapshot); await fs.rename(path.join(dataDir, 'db.tmp'), path.join(dataDir, 'db.json')); }); return writes; };
+const accounts = await createAccounts({ db, save, dataDir });
 const modelConfig = readModelConfig();
-let modelConnection = null;
+const modelBinding = digest(modelConfig.provider+'|'+modelConfig.model+'|'+modelConfig.endpoint+'|'+modelConfig.apiKey).toString('hex');
+let modelConnection = db.modelConnection?.binding===modelBinding && Date.now()-db.modelConnection.checkedAt<24*3600000 ? db.modelConnection : null;
 const sessionLocks = new Set(), modelRates = new Map();
 let modelInFlight = 0;
 const dailyModelLimit = Math.max(1, Math.min(10000, Number(process.env.AI_DAILY_REQUEST_LIMIT) || 100));
-const aiStatus = () => ({ ...modelStatus(modelConfig), connected: Boolean(modelConnection), checkedAt: modelConnection?.checkedAt || null });
+const aiStatus = () => ({ ...modelStatus(modelConfig), connected: Boolean(modelConnection && Date.now()-modelConnection.checkedAt<24*3600000), checkedAt: modelConnection?.checkedAt || null });
 async function modelCall(userId, operation) {
   if (!modelConfig.ready) throw fail(503, modelConfig.reason);
   const day = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
@@ -49,9 +52,10 @@ const publicCase = ({ replies, opening, ...rest }) => rest;
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(body)); };
-async function body(req, max = 100_000) { const chunks = []; let size = 0; for await (const chunk of req) { size += chunk.length; if (size > max) throw fail(413, '内容过大'); chunks.push(chunk); } try { return JSON.parse(Buffer.concat(chunks).toString()); } catch { throw fail(400, '请求格式错误'); } }
-function auth(req) { const token = req.headers.authorization?.replace(/^Bearer /, ''); const item = db.tokens[token]; if (!item || item.expires < Date.now()) throw fail(401, '请重新登录'); return db.users.find(u => u.id === item.userId); }
-function ownSession(id, user) { const s = db.sessions.find(s => s.id === id); if (!s || (s.userId !== user.id && user.role !== 'teacher')) throw fail(404, '实训记录不存在'); return s; }
+async function body(req, max = 100_000) { const chunks = []; let size = 0; for await (const chunk of req) { size += chunk.length; if (size > max) throw fail(413, '内容过大'); chunks.push(chunk); } try { const value=JSON.parse(Buffer.concat(chunks).toString()); if(!value||typeof value!=='object'||Array.isArray(value))throw Error();return value; } catch { throw fail(400, '请求格式错误'); } }
+function auth(req) { return accounts.auth(req); }
+function ownSession(id,user) { const s=db.sessions.find(s=>s.id===id); if(!s||!accounts.canSeeSession(user,s))throw fail(404,'实训记录不存在'); return s; }
+function setLoginCookie(res, token) { res.setHeader('Set-Cookie', `practice-session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${process.env.COOKIE_SECURE==='1'?'; Secure':''}`); }
 function editable(s) { if (s.status === 'completed') throw fail(409, '已完成的实训不可修改，请开始新的练习'); }
 function elapsed(s) { return Math.floor((Date.now() - s.startedAt) / 1000); }
 function feedback(s) {
@@ -70,7 +74,7 @@ const server = http.createServer(async (req, res) => {
   try {
     res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'same-origin');
     const url = new URL(req.url, 'http://localhost'); const p = url.pathname;
-    if (p === '/api/health') return json(res, 200, { ok: true, mode: 'demo', teachingVersion, aiVersion });
+    if (p === '/api/health') return json(res, 200, { ok: true, mode: 'trial', teachingVersion, aiVersion, authVersion: 'accounts-2' });
     if (accessCode) {
       const cookie = (req.headers.cookie || '').split(';').map(v => v.trim()).find(v => v.startsWith('practice-access='))?.slice(16) || '';
       if (p === '/access' && req.method === 'POST') {
@@ -89,42 +93,55 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'" }); return res.end(accessPage);
       }
     }
+    if (p.startsWith('/api/') && !['GET','HEAD'].includes(req.method) && req.headers.origin && req.headers.origin !== `https://${req.headers.host}` && req.headers.origin !== `http://${req.headers.host}`) throw fail(403,'跨站请求已拒绝。');
+    if (p === '/api/auth/status' && req.method === 'GET') return json(res,200,accounts.status());
     if (p === '/api/login' && req.method === 'POST') {
-      const { role, name } = await body(req);
-      if (!['student', 'teacher'].includes(role)) throw fail(400, '请选择身份');
-      if (typeof name !== 'string' || !name.trim() || name.length > 30) throw fail(400, '请输入 1—30 字的姓名');
-      const user = { id: randomUUID(), role, name: name.trim() }; db.users.push(user);
-      const token = randomUUID(); db.tokens[token] = { userId: user.id, expires: Date.now() + 7 * 86400000 }; await save();
-      return json(res, 200, { token, user, demo: true });
+      const result = await accounts.login(await body(req), req.socket.remoteAddress || 'unknown'); setLoginCookie(res,result.token); return json(res,200,result);
+    }
+    if (p === '/api/register' && req.method === 'POST') {
+      const result = await accounts.register(await body(req)); setLoginCookie(res,result.token); return json(res,201,result);
     }
     if (p.startsWith('/api/')) {
       const user = auth(req);
+      if(user.mustChangePassword && !['/api/me','/api/logout','/api/change-password'].includes(p))throw fail(403,'请先修改临时密码，再使用平台。');
+      if(p==='/api/change-password'&&req.method==='POST') { const result=await accounts.changePassword(user,await body(req));setLoginCookie(res,result.token);return json(res,200,result); }
+      if(p==='/api/accounts'&&req.method==='GET')return json(res,200,accounts.accounts(user));
+      if(p==='/api/classes'&&req.method==='GET')return json(res,200,accounts.classes(user));
+      if(p==='/api/classes'&&req.method==='POST')return json(res,201,await accounts.createClass(user,await body(req)));
+      if(p==='/api/admin/users'&&req.method==='POST')return json(res,201,await accounts.createStaff(user,await body(req)));
+      if(p==='/api/roster'&&req.method==='GET')return json(res,200,accounts.roster(user));
+      if(p==='/api/roster'&&req.method==='POST')return json(res,201,await accounts.importRoster(user,await body(req)));
+      const resetMatch=p.match(/^\/api\/accounts\/([a-f0-9-]+)\/reset-password$/);
+      if(resetMatch&&req.method==='POST')return json(res,200,await accounts.resetPassword(user,resetMatch[1],await body(req)));
+      const inviteMatch=p.match(/^\/api\/roster\/([a-f0-9-]+)\/reissue$/);
+      if(inviteMatch&&req.method==='POST')return json(res,200,await accounts.reissue(user,inviteMatch[1]));
       if (p === '/api/ai/status' && req.method === 'GET') return json(res, 200, aiStatus());
       if (p === '/api/ai/check' && req.method === 'POST') {
-        if (user.role !== 'teacher') throw fail(403, '仅教师可检查模型连接');
-        try { modelConnection = await modelCall(user.id, () => checkModel(modelConfig)); } catch(e) { modelConnection = null; throw e; }
+        if (!['teacher','admin'].includes(user.role)) throw fail(403, '仅教师可检查模型连接');
+        try { modelConnection = await modelCall(user.id, () => checkModel(modelConfig)); db.modelConnection={binding:modelBinding,checkedAt:modelConnection.checkedAt};await save(); } catch(e) { modelConnection = null;delete db.modelConnection;await save();throw e; }
         return json(res, 200, { ...aiStatus(), ok: true });
       }
-      if (p === '/api/learning' && req.method === 'GET') return json(res, 200, { ...learningLibrary, roleGuides: user.role === 'teacher' ? teacherRoles() : undefined });
-      if (p === '/api/me') return json(res, 200, user);
-      if (p === '/api/logout' && req.method === 'POST') { delete db.tokens[req.headers.authorization.replace(/^Bearer /, '')]; await save(); return json(res, 200, { ok: true }); }
-      if (p === '/api/sessions' && req.method === 'GET') return json(res, 200, db.sessions.filter(s => user.role === 'teacher' || s.userId === user.id).map(s => ({ ...sessionView(s), studentName: db.users.find(u => u.id === s.userId)?.name || '学生' })));
+      if (p === '/api/learning' && req.method === 'GET') return json(res, 200, { ...learningLibrary, roleGuides: ['teacher','admin'].includes(user.role) ? teacherRoles() : undefined });
+      if (p === '/api/me') return json(res, 200, publicUser(user));
+      if (p === '/api/logout' && req.method === 'POST') { await accounts.logout(req); res.setHeader('Set-Cookie','practice-session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'); return json(res, 200, { ok: true }); }
+      if (p === '/api/sessions' && req.method === 'GET') return json(res, 200, db.sessions.filter(s => accounts.canSeeSession(user,s)).map(s => ({ ...sessionView(s), studentName: db.users.find(u => u.id === s.userId)?.name || '学生', studentId: db.users.find(u=>u.id===s.userId)?.studentId || '' })));
       if (p === '/api/sessions' && req.method === 'POST') {
         if (user.role !== 'student') throw fail(403, '请使用学生身份开始实训');
         const options = Number(req.headers['content-length'] || 0) > 0 || req.headers['transfer-encoding'] ? await body(req) : {};
-        const mode = options.mode || 'rules';
+        const mode = options.mode || (aiStatus().connected ? 'ai' : 'rules');
         if (!['rules', 'ai'].includes(mode)) throw fail(400, '请选择实训模式');
         if (mode === 'ai') {
           assertAIConsent({});
           if (options.consentAI !== true) throw fail(400, '开始AI会谈前，请确认文字资料发送至模型服务的用途。');
         }
-        const c = cases[randomInt(cases.length)]; const s = { id: randomUUID(), userId: user.id, case: publicCase(c), createdAt: Date.now(), startedAt: null, status: 'drawn', teachingVersion, dialogueEngine: mode === 'ai' ? 'ai' : 'scripted-rules', aiConsent: mode === 'ai' ? { at: Date.now(), provider: modelConfig.provider, model: modelConfig.model, destination: modelStatus(modelConfig).destination } : null, messages: [], video: null, feedback: null, reflection: '', teacherNote: '' };
+        const classId=options.classId || user.classIds[0]; if(!user.classIds.includes(classId)||!accounts.classes(user).some(c=>c.id===classId&&!c.archived))throw fail(403,'未加入可用班级，请联系教师。');
+        const c = cases[randomInt(cases.length)]; const s = { id: randomUUID(), userId: user.id, classId, case: publicCase(c), createdAt: Date.now(), startedAt: null, status: 'drawn', teachingVersion, dialogueEngine: mode === 'ai' ? 'ai' : 'scripted-rules', aiConsent: mode === 'ai' ? { at: Date.now(), provider: modelConfig.provider, model: modelConfig.model, destination: modelStatus(modelConfig).destination } : null, messages: [], video: null, feedback: null, reflection: '', teacherNote: '' };
         db.sessions.push(s); await save(); return json(res, 201, s);
       }
       if (p === '/api/export' && req.method === 'GET') {
-        if (user.role !== 'teacher') throw fail(403, '仅教师可导出');
+        if (!['teacher','admin'].includes(user.role)) throw fail(403, '仅教师可导出');
         const cell = v => '"' + String(v ?? '').replace(/^[=+@\-\t\r]/, "'$&").replaceAll('"', '""') + '"';
-        const rows = [['学生', '案例', '状态', '实训时间', '学生感受', '教师点评', '文字规则复盘', '教材章节依据', 'AI文字反馈', 'AI建议星级（文字）', '教师复核星级（文字）', '复核依据'], ...db.sessions.map(s => [db.users.find(u => u.id === s.userId)?.name, s.case.id + ' · ' + s.case.name, s.status, new Date(s.createdAt).toISOString(), s.reflection, s.teacherNote, ['upload', 'feedback', 'completed'].includes(s.status) ? sessionView(s).textReview.observations.map(o => `${o.title}：${o.evidence.map(e => `第${e.turn}次回应「${e.quote}」`).join('；')}；${o.action}`).join('\n') : '', ['upload', 'feedback', 'completed'].includes(s.status) ? [...new Set(sessionView(s).textReview.observations.flatMap(o => o.references.map(r => r.source)))].join('；') : '', s.aiReview?.summary || '', s.aiReview?.proposedStars ?? '', s.teacherAssessment?.stars ?? '', s.teacherAssessment?.note || ''])];
+        const rows = [['学生', '案例', '状态', '实训时间', '学生感受', '教师点评', '文字规则复盘', '教材章节依据', 'AI文字反馈', 'AI建议星级（文字）', '教师复核星级（文字）', '复核依据'], ...db.sessions.filter(s=>accounts.canSeeSession(user,s)).map(s => [db.users.find(u => u.id === s.userId)?.name, s.case.id + ' · ' + s.case.name, s.status, new Date(s.createdAt).toISOString(), s.reflection, s.teacherNote, ['upload', 'feedback', 'completed'].includes(s.status) ? sessionView(s).textReview.observations.map(o => `${o.title}：${o.evidence.map(e => `第${e.turn}次回应「${e.quote}」`).join('；')}；${o.action}`).join('\n') : '', ['upload', 'feedback', 'completed'].includes(s.status) ? [...new Set(sessionView(s).textReview.observations.flatMap(o => o.references.map(r => r.source)))].join('；') : '', s.aiReview?.summary || '', s.aiReview?.proposedStars ?? '', s.teacherAssessment?.stars ?? '', s.teacherAssessment?.note || ''])];
         res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="practice-feedback.csv"' }); return res.end('\ufeff' + rows.map(r => r.map(cell).join(',')).join('\r\n'));
       }
       const match = p.match(/^\/api\/sessions\/([a-f0-9-]+)(?:\/(start|chat|finish|video|reflection|note|ai-review|assessment))?$/);
@@ -153,7 +170,7 @@ const server = http.createServer(async (req, res) => {
           s.aiReview = result; await save(); return json(res, 200, sessionView(s));
         }
         if (action === 'assessment' && req.method === 'POST') {
-          if (user.role !== 'teacher') throw fail(403, '仅教师可复核语言反馈');
+          if (!['teacher','admin'].includes(user.role)) throw fail(403, '仅教师可复核语言反馈');
           if (!['upload', 'feedback', 'completed'].includes(s.status)) throw fail(409, '请先结束文字会谈');
           const { stars, note } = await body(req);
           if (!Number.isInteger(stars) || stars < 1 || stars > 5 || typeof note !== 'string' || !note.trim() || note.length > 3000) throw fail(400, '请选择1—5星并填写复核依据（最多3000字）。');
@@ -163,7 +180,7 @@ const server = http.createServer(async (req, res) => {
           await save(); return json(res, 200, sessionView(s));
         }
         if (action === 'note' && req.method === 'POST') {
-          if (user.role !== 'teacher') throw fail(403, '仅教师可点评'); const { note } = await body(req); if (typeof note !== 'string' || note.length > 3000) throw fail(400, '点评限 3000 字'); s.teacherNote = note; await save(); return json(res, 200, sessionView(s));
+          if (!['teacher','admin'].includes(user.role)) throw fail(403, '仅教师可点评'); const { note } = await body(req); if (typeof note !== 'string' || note.length > 3000) throw fail(400, '点评限 3000 字'); s.teacherNote = note; await save(); return json(res, 200, sessionView(s));
         }
         if (s.userId !== user.id || user.role !== 'student') throw fail(403, '无权修改此记录');
         editable(s);

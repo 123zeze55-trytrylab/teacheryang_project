@@ -1,3 +1,4 @@
+import { fixtureEnvironment, provisionLogin } from '../testing/fixtures.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -9,7 +10,7 @@ import { once } from 'node:events';
 const dir = await mkdtemp(path.join(tmpdir(), 'casework-test-'));
 let server, base;
 async function start(extraEnv = {}) {
-  server = spawn(process.execPath, ['server.js'], { env: { ...process.env, PORT: '0', DATA_DIR: dir, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
+  server = spawn(process.execPath, ['server.js'], { env: { ...process.env, ...fixtureEnvironment, PORT: '0', DATA_DIR: dir, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
   let log = '';
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(Error('Server startup timeout: ' + log)), 10000);
@@ -20,6 +21,7 @@ async function start(extraEnv = {}) {
 }
 async function stop() { if (server && server.exitCode === null) { server.kill(); await once(server, 'exit'); } }
 async function request(route, token, method = 'GET', body, headers = {}) {
+  if(route==='/login'&&body?.name&&!body.username){const r=await provisionLogin(base,body);return {...r,status:200};}
   const r = await fetch(base + '/api' + route, { method, headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers }, body: body instanceof Uint8Array ? body : body ? JSON.stringify(body) : undefined });
   return { status: r.status, data: (r.headers.get('content-type') || '').includes('application/json') ? await r.json() : await r.text(), headers: r.headers };
 }
@@ -30,7 +32,7 @@ test('student practice, persistence, video, reflection, teacher review and autho
     let student, other, teacher, session;
     await t.test('static app and public health work; data and unauthenticated records are protected', async () => {
       const r = await fetch(base); assert.equal(r.status, 200); assert.match(await r.text(), /知遇/);
-      assert.equal((await request('/health')).data.mode, 'demo');
+      assert.equal((await request('/health')).data.mode, 'trial');
       assert.equal((await request('/sessions')).status, 401);
       assert.equal((await request('/learning')).status, 401);
       assert.equal((await fetch(base + '/.data/db.json')).status, 404);
@@ -122,7 +124,7 @@ test('hosted demo gate protects app and API, permits cookie plus bearer login', 
     await start({ DEMO_ACCESS_CODE: code, REQUIRE_ACCESS_CODE: '1', COOKIE_SECURE: '1' });
     assert.equal((await request('/health')).status, 200);
     assert.match(await (await fetch(base)).text(), /受保护的体验站/);
-    assert.equal((await request('/login', null, 'POST', { role: 'teacher', name: 'blocked' })).status, 403);
+    assert.equal((await request('/login', null, 'POST', { role: 'teacher', username: 'blocked', password: 'invalid-password' })).status, 403);
     const wrong = await fetch(base + '/access', { method: 'POST', body: new URLSearchParams({ code: 'wrong' }), redirect: 'manual' });
     assert.equal(wrong.status, 403);
     const admitted = await fetch(base + '/access', { method: 'POST', body: new URLSearchParams({ code }), redirect: 'manual' });
@@ -131,7 +133,7 @@ test('hosted demo gate protects app and API, permits cookie plus bearer login', 
     assert.match(setCookie, /HttpOnly/); assert.match(setCookie, /Secure/); assert.match(setCookie, /SameSite=Strict/);
     const cookie = setCookie.split(';')[0];
     assert.doesNotMatch(await (await fetch(base, { headers: { Cookie: cookie } })).text(), /受保护的体验站/);
-    const login = await request('/login', null, 'POST', { role: 'student', name: 'protected' }, { Cookie: cookie });
+    const login = await request('/login', null, 'POST', { role: 'admin', username: 'admin', password: fixtureEnvironment.ADMIN_PASSWORD }, { Cookie: cookie });
     assert.equal(login.status, 200);
     assert.equal((await request('/sessions', login.data.token, 'GET', undefined, { Cookie: cookie })).status, 200);
     assert.equal((await request('/sessions', login.data.token)).status, 403);

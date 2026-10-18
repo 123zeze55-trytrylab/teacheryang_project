@@ -2,6 +2,7 @@
 Runs against an isolated temporary database; advances its clock fixture by restarting.
 """
 import json
+import sys
 import os
 from pathlib import Path
 import shutil
@@ -11,6 +12,8 @@ import time
 from playwright.sync_api import sync_playwright, expect
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'testing'))
+from browser_helpers import ADMIN_PASSWORD, setup_users, register_student, login_teacher
 OUT = Path('/tmp/casework-smoke')
 OUT.mkdir(exist_ok=True)
 video = OUT / 'practice.mp4'
@@ -20,7 +23,7 @@ with tempfile.TemporaryDirectory(prefix='casework-browser-') as data:
     proc = None
     def start():
         global proc
-        proc = subprocess.Popen(['node', 'server.js'], cwd=ROOT, env={**os.environ, 'PORT': '3031', 'DATA_DIR': data}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = subprocess.Popen(['node', 'server.js'], cwd=ROOT, env={**os.environ, 'ADMIN_PASSWORD': ADMIN_PASSWORD, 'PORT': '3031', 'DATA_DIR': data}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         line = proc.stdout.readline()
         assert '3031' in line, line
     def stop():
@@ -29,14 +32,14 @@ with tempfile.TemporaryDirectory(prefix='casework-browser-') as data:
             proc.wait(timeout=10)
     try:
         start()
+        fixture = setup_users('http://127.0.0.1:3031', '测试')
         with sync_playwright() as p:
             browser = p.chromium.launch(executable_path=shutil.which('chromium'), headless=True, args=['--no-sandbox'])
             page = browser.new_page(viewport={'width': 1440, 'height': 1000})
             errors = []
             page.on('pageerror', lambda error: errors.append(str(error)))
             page.goto('http://127.0.0.1:3031')
-            page.get_by_label('你的称呼').fill('测试学生')
-            page.get_by_role('button', name='进入实训空间').click()
+            register_student(page, fixture)
             page.get_by_role('heading', name='你好，测试学生').wait_for()
             page.screenshot(path=str(OUT / 'desktop.png'), full_page=True)
             page.set_viewport_size({'width': 390, 'height': 844})
@@ -52,6 +55,8 @@ with tempfile.TemporaryDirectory(prefix='casework-browser-') as data:
             page.set_viewport_size({'width': 1024, 'height': 768})
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'iPad page overflow'
             page.get_by_role('button', name='开始一次实训').click()
+            page.locator('.offline-option summary').click()
+            page.locator('input[value=rules]').check()
             page.get_by_role('button', name='随机抽取案主').click()
             page.get_by_role('button', name='我准备好了，开始会谈').click()
             page.get_by_label('输入你的回应').fill('听起来，你一方面担心家人，一方面也感到很累。我理解得对吗？')
@@ -86,9 +91,7 @@ with tempfile.TemporaryDirectory(prefix='casework-browser-') as data:
             assert page.locator('#knowledge-empathy').is_visible()
             page.get_by_role('button', name='我的记录', exact=True).click()
             page.get_by_role('button', name='退出登录', exact=True).click()
-            page.get_by_role('button', name='我是教师').click()
-            page.get_by_label('你的称呼').fill('测试教师')
-            page.get_by_role('button', name='进入教师工作台').click()
+            login_teacher(page, fixture)
             page.get_by_role('button', name='检查模型连接').wait_for()
             assert page.get_by_role('button', name='检查模型连接').is_enabled()
             page.get_by_role('button', name='检查模型连接').click()
